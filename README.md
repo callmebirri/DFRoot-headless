@@ -2,93 +2,129 @@
   <img src=".github/icon.png" width="96" />
 </p>
 
-# DFRoot [DirtyFrag (CVE-2026-43284)]
+# DFRoot Headless [Automated ADB Root Edition]
 
-DFRoot is an Android rooting tool that exploits CVE-2026-43284 — a kernel page cache write primitive — to load a custom kernel module without requiring an unlocked bootloader. It is intentionally designed to be SU Manager agnostic and works with any KernelSU-compatible SU manager.
+DFRoot Headless is an automated, headless fork of [DFRoot](https://github.com/diabl0w/DFRoot) leveraging the DirtyFrag vulnerability (**CVE-2026-43284**).
 
-> [!IMPORTANT]
-> Before hitting that fork button, consider making a pull request instead :)
+This fork completely eliminates the need for any on-device GUI interaction or installed SU Manager app (such as KernelSU / KernelSU-Next APK). It operates as a silent **Headless Foreground Service** orchestrated entirely from your PC via ADB, granting instantaneous `su` root access to ADB shell (`UID 2000`).
 
-## FAQ
+---
 
-**Q: Log says patching failed and that my device isn't vulnerable**
+## Key Fork Features
 
-A: Sorry, there is no fix. Either:
-  - Your device's kernel is too new
-  - Your device manufacturer backported the official mitigation
-  - [Accidental mitigation](https://github.com/V4bel/dirtyfrag/issues/23#issuecomment-4405314290) (typically seen on kernel 6.1)
+- **Headless Worker Architecture:** All Activities, Settings screens, and launchers have been stripped. DFRoot runs as an exported Android Foreground Service (`df.root.headless.RootService`).
+- **No Manager App Required:** You do not need to install KernelSU or KernelSU-Next APK on your device. The service dynamically extracts `libksud.so` from a local APK or downloads the official release directly from GitHub in memory.
+- **Immediate Shell Root (`--allow-shell`):** Patches the userspace bootstrap to launch `ksud late-load` with `--allow-shell`, allowing `adb shell` to execute `su` without requiring a GUI grant dialog.
+- **Kernel Vermagic & Safety Audit:** Features an embedded ELF64 `.modinfo` parser in `bootstrap.c` that validates kernel module vermagic against `uname -r` prior to execution, preventing kernel panic/bootloops.
+- **Interactive 1-Click PC Tool (`tools/adb_headless_root.py`):**
+  - **Auto-Build:** Detects missing APK and automatically compiles it using local Gradle wrapper.
+  - **Interactive Device Selector:** Multi-device selection with arrow keys (`Up` / `Down` / `Enter`).
+  - **Pre-flight Audit:** Inspects Manufacturer, Model, Android Version, CPU ABI, and Linux Kernel compatibility.
+  - **Live Logcat Streaming:** Real-time log trace with instant error diagnostics (no hanging/timeouts).
+  - **Automated Verification & Cleanup:** Verifies `su -c id` and cleans up temporary files on the device.
 
-**Q: Log says "SUCCESS" or "ksud exited with error", but I don't have root**
+---
 
-A: First, try disabling "Auto Soft Reboot" in DFRoot settings if you have it enabled, otherwise https://github.com/diabl0w/DFRoot/discussions/69
+## Supported Environments
 
-**Q: I installed a module and now I can't launch root without crashing**
+- **Target Architecture:** `arm64-v8a` only (AArch64).
+- **Target Android Versions:** Android 12 through Android 17 (API 31 - 36).
+- **Vulnerable Linux Kernels:** 5.10, 5.15, 6.1, 6.6, 6.12, 6.18.
 
-A: Toggle "Disable KSU Modules" in DFRoot settings
+---
 
-**Q: I installed a module and have "Start at Boot" enabled and now I am bootlooping**
+## Quick Start (1-Click Root via PC)
 
-A: Typically Android will detect bootloops and boot you into Safe Mode, otherwise you can usually hold the Volume Down button during boot to enter safe mode. From there, disable "Start on Boot" and enable "Disable KSU Modules" in DFRoot settings or just uninstall DFRoot until you stabilize.
+### 1. Requirements on PC
+- Python 3.8+
+- Android SDK Platform-Tools (`adb` added to PATH)
+- Connected Android device with **USB Debugging** enabled
 
-## Usage
+### 2. Run the Automated Orchestrator
 
-> [!WARNING]
-> I am not responsible for any damage to your device.
+Open terminal in the project directory and run:
 
-1. Install [DFRoot](https://github.com/diabl0w/DFRoot/releases/latest)
-2. Install a SU Manager from below:
-   - Samsung:
-     - [diabl0w's KernelSU](https://github.com/diabl0w/KernelSU/releases/latest)
-   - Other:
-     - [KernelSU](https://github.com/tiann/KernelSU/releases/latest)
-     - [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases/latest)
-     - [KowSU](https://github.com/KOWX712/KernelSU/releases/latest)
+```bash
+# Windows
+python .\tools\adb_headless_root.py
 
-> If you have a custom KernelSU fork for a specific manufacturer, please make a pull request to add it here.
-
-## Features
-
-- Start on Boot
-- Automatic soft reboot (if `late-load --soft-reboot` supported by your SU Manager)
-- RO Partition Protection
-- Disable all KernelSU modules, to recover from a broken one
-- Shizuku not needed — regain root without WiFi!
-
-## How it works
-
-The Android kernel decrypts AES-CBC ESP packets directly into the page cache of files open for `splice()`. By crafting `IV = AES_ECB_DEC(key, current_content) ⊕ desired_content`, any 16-byte-aligned block in a mapped shared library can be overwritten without write permission and without copy-on-write.
-
-The exploit uses this primitive to patch shellcode into `libc++.so` in the kernel's page cache. The next privileged call to the hooked function runs the shellcode, which loads our custom kernel module via `insmod`.
-
-### Exploit chain
-
-1. **IpSec transform** — App allocates a `UdpEncapsulationSocket` + SPI and builds an AES-CBC/HMAC-SHA256 ESP transform via `IpSecManager`.
-
-2. **splicehelper → crash_dump64** — The splicehelper binary is spliced into `crash_dump64` via the CBC primitive. `crash_dump64` runs in the `crash_dump` SELinux domain (via exec label transition), which can open `vendor_file` labeled files (untrusted_app context cannot read these files so we need this bridge). The splicehelper serves two modes: splice mode (pipe a 16-byte page chunk out to the parent for write) and read mode (`argv[3]="r"`, write 16 bytes of file content to a pipe fd for IV computation).
-
-3. **dfroot.ko → vendor_file** — The kernel module is written via the crash_dump bridge (splicehelper splice mode) into a `vendor_file`-labeled file.
-
-4. **libc++ hook** (fires in init, uid=0, tid=1) — Shellcode is patched into `libc++.so` at `std::ostream::sentry::sentry()` (`_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_`). Triggered by: `createOrphanProcess()` double-forks so the grandchild is adopted by PID 1 (init); when init reaps the orphan its main thread (tid=1) calls through the hooked function. The shellcode:
-   - Checks `getuid()==0` and `gettid()==1`; returns immediately otherwise
-   - Creates `/dev/df` as a one-shot mutex (O_CREAT|O_EXCL) to prevent re-entry
-   - Clones a worker child (parent returns to init immediately)
-   - Worker forks a grandchild; grandchild writes `u:r:vendor_modprobe:s0` to `/proc/self/attr/exec` then execs `/vendor/bin/insmod <ko_target>`
-
-5. **dfroot.ko init** (runs as `vendor_modprobe`, uid=0) — The KO is loaded by `insmod` in the `vendor_modprobe` SELinux domain:
-   - Writes `false` to `selinux_state` (global permissive)
-   - Bypasses DEFEX via kprobes (if applicable)
-   - Calls `call_usermodehelper` to run our custom bootstrap code
-
-6. **bootstrap.c** — performs various functions and finally launches the su daemon from your installed SU Manager.
-
-## Building
-
-```sh
-make
+# Linux / macOS
+python3 tools/adb_headless_root.py
 ```
 
-## Credits
+The script will:
+1. Detect connected devices (presents an interactive menu if multiple devices are attached).
+2. Audit device specs (Manufacturer, Kernel, Android OS, ABI).
+3. Auto-compile `DFRoot_4.8-headless.apk` if not already built.
+4. Push and install the headless package.
+5. Trigger `RootService` via ADB and stream the exploit execution logcat in real-time.
+6. Verify root privileges (`su -c id`) and clean up the temporary APK.
 
-- Original PoC and various code: https://github.com/lsposed/lspromise
-- SELinux Permissive kernel modules and various code: https://github.com/polygraphene/DFReroot
-- Unprivileged XFRM socket method: https://github.com/combeng6th/DirtyInit
+---
+
+## Advanced CLI Options
+
+```text
+usage: adb_headless_root.py [-h] [-s SERIAL] [-y] [--apk APK] [--ksu-apk KSU_APK] [--no-cleanup]
+
+options:
+  -h, --help           Show this help message and exit
+  -s, --serial SERIAL  Target specific device serial
+  -y, --yes            Auto-confirm compatibility warnings (non-interactive mode)
+  --apk APK            Path to custom DFRoot APK (built automatically if omitted)
+  --ksu-apk KSU_APK    Path to local KernelSU-Next APK (auto-downloaded from GitHub if omitted)
+  --no-cleanup         Keep DFRoot APK installed on device after success
+```
+
+---
+
+## Manual Execution via ADB Shell
+
+If you prefer executing steps manually:
+
+```bash
+# 1. Build the APK (if not already compiled)
+./gradlew :app:assembleDebug
+
+# 2. Push KernelSU-Next APK (optional, service can download automatically)
+adb push ksu.apk /data/local/tmp/ksu.apk
+adb shell chmod 666 /data/local/tmp/ksu.apk
+
+# 3. Install DFRoot Headless APK
+adb install -r -g app/build/outputs/apk/debug/DFRoot_4.8-headless.apk
+
+# 4. Trigger Headless RootService
+adb shell am start-foreground-service -n df.root/df.root.headless.RootService
+
+# 5. Monitor real-time logs
+adb logcat -s DFRoot_Headless dfroot
+
+# 6. Verify root
+adb shell su -c id
+```
+
+---
+
+## Building from Source
+
+To compile the headless APK manually on your workstation:
+
+```bash
+# Windows
+.\gradlew.bat :app:assembleDebug
+
+# Linux / macOS
+./gradlew :app:assembleDebug
+```
+
+Built APK will be located at:
+`app/build/outputs/apk/debug/DFRoot_4.8-headless.apk`
+
+---
+
+## Credits & Upstream
+
+- **Original DFRoot Project:** [diabl0w/DFRoot](https://github.com/diabl0w/DFRoot)
+- **KernelSU-Next:** [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
+- **DirtyFrag Vulnerability (CVE-2026-43284) PoC:** [lsposed/lspromise](https://github.com/lsposed/lspromise) & [V4bel/dirtyfrag](https://github.com/V4bel/dirtyfrag)
+- **SELinux Permissive kernel modules:** [polygraphene/DFReroot](https://github.com/polygraphene/DFReroot)
