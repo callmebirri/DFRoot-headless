@@ -46,9 +46,14 @@ public class RootService extends Service implements IReporter {
         report("RootService started\n");
         // check success flag
         if (new File(FLAG_SUCCESS).exists()) {
-            report("Already rooted, exiting\n");
-            stopSelf();
-            return START_NOT_STICKY;
+            if (new File("/dev/df").exists()) {
+                report("Already rooted in current session, exiting\n");
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            report("Stale flag detected from previous session, resetting\n");
+            new File(FLAG_SUCCESS).delete();
+            new File(FLAG_FAIL).delete();
         }
         // start foreground service
         startForeground(NOTIF_ID, buildNotification());
