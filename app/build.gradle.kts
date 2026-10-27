@@ -19,9 +19,9 @@ android {
     defaultConfig {
         applicationId = "df.root"
         minSdk = 32
-        targetSdk = 37
-        versionCode = 407
-        versionName = "4.7"
+        targetSdk = 30
+        versionCode = 408
+        versionName = "4.8-headless"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
