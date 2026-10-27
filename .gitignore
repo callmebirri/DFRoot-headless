@@ -29,4 +29,3 @@ lkm/Module.symvers
 # Generated binaries
 out/
 app/src/main/jni/splicehelper
-app/src/main/jni/ko/*.ko
