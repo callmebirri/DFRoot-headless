@@ -152,11 +152,50 @@ def check_already_rooted(serial):
         return True
     return False
 
+def ensure_local_properties():
+    loc = os.path.join(REPO_ROOT, "local.properties")
+    if not os.path.exists(loc):
+        sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+        if not sdk and os.name == "nt":
+            cand = os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk")
+            if os.path.exists(cand): sdk = cand
+        if sdk:
+            sdk_clean = sdk.replace("\\", "\\\\") if os.name == "nt" else sdk
+            with open(loc, "w") as f:
+                f.write(f"sdk.dir={sdk_clean}\n")
+
+def ensure_lkm_assets():
+    ko_dir = os.path.join(REPO_ROOT, "app", "src", "main", "jni", "ko")
+    if os.path.exists(os.path.join(ko_dir, "dfroot-android12-5.10.ko")): return
+    print("[*] LKM files missing in jni/ko. Restoring...")
+    os.makedirs(ko_dir, exist_ok=True)
+    import urllib.request, zipfile, struct
+    tmp = os.path.join(REPO_ROOT, "dfroot_tmp.apk")
+    urllib.request.urlretrieve("https://github.com/diabl0w/DFRoot/releases/download/v4.7/DFRoot_4.7.apk", tmp)
+    with zipfile.ZipFile(tmp, "r") as z:
+        data = z.read("lib/arm64-v8a/libdfroot.so")
+    if os.path.exists(tmp): os.remove(tmp)
+    ko_names = [
+        "dfroot-android12-5.10.ko", "dfroot-android13-5.10.ko", "dfroot-android13-5.15.ko",
+        "dfroot-android14-5.15.ko", "dfroot-android14-6.1.ko", "dfroot-android15-6.6.ko",
+        "dfroot-android16-6.12.ko", "dfroot-android17-6.18.ko"
+    ]
+    offsets = [m.start() for m in re.finditer(b"\x7fELF", data)]
+    for i, name in enumerate(ko_names):
+        sub = data[offsets[i + 1]:]
+        e_shoff, = struct.unpack_from("<Q", sub, 40)
+        e_shentsize, e_shnum = struct.unpack_from("<HH", sub, 58)
+        sz = e_shoff + e_shentsize * e_shnum
+        with open(os.path.join(ko_dir, name), "wb") as f: f.write(sub[:sz])
+    print("[+] LKM files restored.")
+
 def ensure_apk(apk_arg):
     if apk_arg and os.path.exists(apk_arg):
         return os.path.abspath(apk_arg)
     candidates = glob.glob(os.path.join(APK_DIR, "*.apk"))
     if candidates: return candidates[0]
+    ensure_local_properties()
+    ensure_lkm_assets()
     print("[*] Building APK with Gradle...")
     cmd = ".\\gradlew.bat :app:assembleDebug" if os.name == "nt" else "./gradlew :app:assembleDebug"
     rc, out, err = run_cmd(cmd, cwd=REPO_ROOT)
