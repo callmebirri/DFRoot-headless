@@ -18,7 +18,7 @@ android {
 
     defaultConfig {
         applicationId = "df.root"
-        minSdk = 32
+        minSdk = 28
         targetSdk = 30
         versionCode = 408
         versionName = "4.8-headless"
@@ -29,11 +29,13 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            storeFile = file(signingProps.getProperty("KEYSTORE_FILE"))
-            storePassword = signingProps.getProperty("KEYSTORE_PASSWORD")
-            keyAlias = signingProps.getProperty("KEY_ALIAS")
-            keyPassword = signingProps.getProperty("KEY_PASSWORD")
+        if (signingPropsFile.exists()) {
+            create("release") {
+                storeFile = file(signingProps.getProperty("KEYSTORE_FILE"))
+                storePassword = signingProps.getProperty("KEYSTORE_PASSWORD")
+                keyAlias = signingProps.getProperty("KEY_ALIAS")
+                keyPassword = signingProps.getProperty("KEY_PASSWORD")
+            }
         }
     }
 
@@ -43,7 +45,9 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (signingPropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
