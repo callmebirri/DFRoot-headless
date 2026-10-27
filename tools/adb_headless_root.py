@@ -244,17 +244,20 @@ def monitor_with_live_logcat(serial):
     return False
 
 def verify(serial, cleanup=True):
-    rc, out, _ = adb_shell(serial, "su -c id")
-    if rc == 0 and "uid=0" in out:
-        print("\n" + "=" * 65)
-        print(f"[+++] ROOT VERIFIED SUCCESSFULLY: {out}")
-        print("=" * 65 + "\n")
-        if cleanup:
-            print("[*] Cleaning up DFRoot APK and temporary files...")
-            adb_cmd(serial, f"uninstall {APK_PACKAGE}")
-            cleanup_flags(serial)
-            print("[+] Cleanup complete.")
-        return True
+    print("[*] Verifying root privileges via 'su -c id'...")
+    for attempt in range(1, 11):
+        rc, out, _ = adb_shell(serial, "su -c id")
+        if rc == 0 and "uid=0" in out:
+            print("\n" + "=" * 65)
+            print(f"[+++] ROOT VERIFIED SUCCESSFULLY: {out}")
+            print("=" * 65 + "\n")
+            if cleanup:
+                print("[*] Cleaning up DFRoot APK and temporary files...")
+                adb_cmd(serial, f"uninstall {APK_PACKAGE}")
+                cleanup_flags(serial)
+                print("[+] Cleanup complete.")
+            return True
+        time.sleep(1)
     print("[-] Root verification failed: 'su -c id' did not return root.")
     return False
 
