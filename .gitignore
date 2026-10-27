@@ -29,3 +29,6 @@ lkm/Module.symvers
 # Generated binaries
 out/
 app/src/main/jni/splicehelper
+
+# Session logs
+tools/logs/

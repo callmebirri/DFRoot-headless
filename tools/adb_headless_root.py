@@ -9,10 +9,29 @@ import glob
 import re
 import subprocess
 import argparse
+from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 APK_DIR = os.path.join(REPO_ROOT, "app", "build", "outputs", "apk", "debug")
+LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
+
+# session log wrapper
+class SessionLogger:
+    def __init__(self, log_path):
+        self.terminal = sys.stdout
+        self.file = open(log_path, "w", encoding="utf-8")
+        self.ansi_re = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+    def write(self, message):
+        self.terminal.write(message)
+        clean = self.ansi_re.sub("", message)
+        self.file.write(clean)
+        self.file.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.file.flush()
 
 APK_PACKAGE = "df.root"
 SERVICE_NAME = "df.root.headless.RootService"
@@ -309,9 +328,17 @@ def main():
     parser.add_argument("--no-cleanup", action="store_true", help="Keep APK installed")
     args = parser.parse_args()
 
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(LOGS_DIR, f"session_{ts}.log")
+    sys.stdout = SessionLogger(log_file)
+    print(f"[*] Session log started: {log_file}")
+
     serial = args.serial or select_target_device()
     inspect_device(serial, auto_yes=args.yes)
-    if check_already_rooted(serial): return
+    if check_already_rooted(serial):
+        print(f"[*] Session log saved: {log_file}")
+        return
     apk_path = ensure_apk(args.apk)
     ksu_path = resolve_ksu_apk(args.ksu_apk)
     cleanup_flags(serial)
@@ -321,6 +348,7 @@ def main():
     adb_shell(serial, f"am start-foreground-service -n {APK_PACKAGE}/{SERVICE_NAME}")
     if monitor_with_live_logcat(serial):
         verify(serial, cleanup=not args.no_cleanup)
+    print(f"[*] Session log saved: {log_file}")
 
 if __name__ == "__main__":
     main()
