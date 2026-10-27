@@ -6,62 +6,87 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/utsname.h>
 #include <unistd.h>
+#include <elf.h>
 
 #define BLKROSET   0x125d
 #define KSUD_STAGE "/data/user_de/0/df.root/ksud"
 #define KSUD       "/data/adb/ksud"
-#define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
 #define MODULES_DIR "/data/adb/modules"
+#define OPTIONAL_KSU_KO "/data/local/tmp/kernelsu.ko"
 
-static int pref_true(const char *buf, const char *key)
-{
-    char needle[64];
-    snprintf(needle, sizeof(needle), "name=\"%s\"", key);
-    char *p = strstr(buf, needle);
-    if (!p) return 0;
-    char *tag_end = strchr(p, '>');
-    char *v = strstr(p, "value=\"true\"");
-    return v && tag_end && v < tag_end;
+static void touch(const char *path) {
+    int fd = open(path, O_CREAT | O_WRONLY, 0666);
+    if (fd >= 0) close(fd);
 }
 
-static int read_prefs(char *su_manager, size_t su_manager_size, int *soft_reboot,
-                      int *disable_modules)
-{
-    int fd = open(PREFS_PATH, O_RDONLY);
+// verify kernel module vermagic
+static int check_vermagic(const char *ko_path) {
+    if (!ko_path || access(ko_path, F_OK) != 0) return 0;
+    int fd = open(ko_path, O_RDONLY);
     if (fd < 0) return -1;
-
-    char buf[4096];
-    int n = read(fd, buf, sizeof(buf) - 1);
+    Elf64_Ehdr ehdr;
+    if (read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) { close(fd); return -1; }
+    if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 || ehdr.e_ident[EI_CLASS] != ELFCLASS64) { close(fd); return -1; }
+    if (ehdr.e_shentsize != sizeof(Elf64_Shdr) || ehdr.e_shnum == 0) { close(fd); return -1; }
+    size_t sh_table_size = (size_t)ehdr.e_shentsize * ehdr.e_shnum;
+    Elf64_Shdr *shdrs = malloc(sh_table_size);
+    if (!shdrs) { close(fd); return -1; }
+    if (lseek64(fd, ehdr.e_shoff, SEEK_SET) < 0 || read(fd, shdrs, sh_table_size) != (ssize_t)sh_table_size) {
+        free(shdrs); close(fd); return -1;
+    }
+    if (ehdr.e_shstrndx >= ehdr.e_shnum) { free(shdrs); close(fd); return -1; }
+    size_t strtab_size = shdrs[ehdr.e_shstrndx].sh_size;
+    char *shstrtab = malloc(strtab_size);
+    if (!shstrtab) { free(shdrs); close(fd); return -1; }
+    if (lseek64(fd, shdrs[ehdr.e_shstrndx].sh_offset, SEEK_SET) < 0 || read(fd, shstrtab, strtab_size) != (ssize_t)strtab_size) {
+        free(shstrtab); free(shdrs); close(fd); return -1;
+    }
+    off64_t modinfo_offset = 0;
+    size_t modinfo_size = 0;
+    for (int i = 0; i < ehdr.e_shnum; i++) {
+        const char *sec_name = shstrtab + shdrs[i].sh_name;
+        if (strcmp(sec_name, ".modinfo") == 0) {
+            modinfo_offset = shdrs[i].sh_offset;
+            modinfo_size = shdrs[i].sh_size;
+            break;
+        }
+    }
+    free(shstrtab); free(shdrs);
+    if (modinfo_size == 0) { close(fd); return -1; }
+    char *modinfo_buf = malloc(modinfo_size + 1);
+    if (!modinfo_buf) { close(fd); return -1; }
+    if (lseek64(fd, modinfo_offset, SEEK_SET) < 0 || read(fd, modinfo_buf, modinfo_size) != (ssize_t)modinfo_size) {
+        free(modinfo_buf); close(fd); return -1;
+    }
+    modinfo_buf[modinfo_size] = '\0';
     close(fd);
-    if (n <= 0) return -1;
-    buf[n] = '\0';
-
-    char *p = strstr(buf, "name=\"su_manager\">");
-    if (!p) return -1;
-    p += strlen("name=\"su_manager\">");
-    char *end = strchr(p, '<');
-    if (!end) return -1;
-    size_t len = end - p;
-    if (len == 0 || len >= su_manager_size) return -1;
-    memcpy(su_manager, p, len);
-    su_manager[len] = '\0';
-
-    *soft_reboot = pref_true(buf, "soft_reboot");
-    *disable_modules = pref_true(buf, "disable_modules");
-
+    const char *vermagic = NULL;
+    char *curr = modinfo_buf;
+    char *limit = modinfo_buf + modinfo_size;
+    while (curr < limit) {
+        if (strncmp(curr, "vermagic=", 9) == 0) { vermagic = curr + 9; break; }
+        curr += strlen(curr) + 1;
+    }
+    if (!vermagic) { free(modinfo_buf); return -1; }
+    struct utsname u;
+    if (uname(&u) != 0) { free(modinfo_buf); return -1; }
+    size_t release_len = strlen(u.release);
+    if (strncmp(vermagic, u.release, release_len) != 0 || (vermagic[release_len] != ' ' && vermagic[release_len] != '\0')) {
+        free(modinfo_buf); return -1;
+    }
+    free(modinfo_buf);
     return 0;
 }
 
-static int adopt_zygote_env(void)
-{
+static int adopt_zygote_env(void) {
     FILE *f = popen("pidof zygote64 zygote", "r");
     if (!f) return -1;
     int pid = 0;
     fscanf(f, "%d", &pid);
     pclose(f);
     if (!pid) return -1;
-
     char path[32];
     snprintf(path, sizeof(path), "/proc/%d/environ", pid);
     int fd = open(path, O_RDONLY);
@@ -71,41 +96,27 @@ static int adopt_zygote_env(void)
     close(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
-    for (char *p = buf, *end = buf + n; p < end; p += strlen(p) + 1)
-        putenv(p);
+    for (char *p = buf, *end = buf + n; p < end; p += strlen(p) + 1) putenv(p);
     return 0;
 }
 
-static int should_ro(const char *name)
-{
+static int should_ro(const char *name) {
     size_t len = strlen(name);
-    if (!strcmp(name, "super"))  return 1;
-    if (!strcmp(name, "misc"))   return 1;
-    if (!strcmp(name, "steady")) return 1;
-    if (len >= 2 && name[len - 2] == '_' &&
-        (name[len - 1] == 'a' || name[len - 1] == 'b'))
-        return 1;
+    if (!strcmp(name, "super") || !strcmp(name, "misc") || !strcmp(name, "steady")) return 1;
+    if (len >= 2 && name[len - 2] == '_' && (name[len - 1] == 'a' || name[len - 1] == 'b')) return 1;
     return 0;
 }
 
-static int set_partitions_ro(void)
-{
+static int set_partitions_ro(void) {
     DIR *dir = opendir("/dev/block/by-name");
-    if (!dir)
-        return -1;
-
+    if (!dir) return -1;
     struct dirent *ent;
     while ((ent = readdir(dir))) {
-        if (!should_ro(ent->d_name))
-            continue;
-
+        if (!should_ro(ent->d_name)) continue;
         char path[128];
         snprintf(path, sizeof(path), "/dev/block/by-name/%s", ent->d_name);
-
         int fd = open(path, O_RDONLY);
-        if (fd < 0)
-            continue;
-
+        if (fd < 0) continue;
         struct stat st;
         if (fstat(fd, &st) == 0 && S_ISBLK(st.st_mode)) {
             int on = 1;
@@ -113,46 +124,13 @@ static int set_partitions_ro(void)
         }
         close(fd);
     }
-
     closedir(dir);
     return 0;
 }
 
-static int late_load_running(void)
-{
-    DIR *d = opendir("/proc");
-    if (!d)
-        return 0;
-    struct dirent *e;
-    char path[64], buf[256];
-    int found = 0;
-    while ((e = readdir(d)) != NULL) {
-        char *end;
-        strtol(e->d_name, &end, 10);
-        if (*end) continue;
-        snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) continue;
-        int n = read(fd, buf, sizeof(buf) - 1);
-        close(fd);
-        if (n <= 0) continue;
-        buf[n] = '\0';
-        for (int i = 0; i < n; i++)
-            if (!buf[i]) buf[i] = ' ';
-        if (strstr(buf, "ksud") && strstr(buf, "late-load")) {
-            found = 1;
-            break;
-        }
-    }
-    closedir(d);
-    return found;
-}
-
-static int run_ctx(const char *ctx, char *const argv[])
-{
+static int run_ctx(const char *ctx, char *const argv[]) {
     pid_t pid = fork();
-    if (pid < 0)
-        return -1;
+    if (pid < 0) return -1;
     if (pid == 0) {
         if (ctx) {
             int fd = open("/proc/self/attr/exec", O_WRONLY);
@@ -166,69 +144,24 @@ static int run_ctx(const char *ctx, char *const argv[])
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static void touch(const char *path)
-{
-    int fd = open(path, O_CREAT | O_WRONLY, 0666);
-    if (fd >= 0)
-        close(fd);
-}
-
-/* Mark every installed module disabled before ksud runs. A broken module
- * otherwise loads on the next boot and bootloops the device. */
-static int disable_modules(void)
-{
-    DIR *dir = opendir(MODULES_DIR);
-    if (!dir)
-        return -1;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir))) {
-        if (ent->d_name[0] == '.')
-            continue;
-        char path[256];
-        snprintf(path, sizeof(path), MODULES_DIR "/%s/disable", ent->d_name);
-        touch(path);
-    }
-    closedir(dir);
-    return 0;
-}
-
-int main(void)
-{
+int main(void) {
     touch("/dev/dfm1");
-    char su_manager[256];
-    int soft_reboot, disable_mods;
-    if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
-        touch("/dev/dfme0");
+    touch("/dev/dfm2");
+    if (adopt_zygote_env()) touch("/dev/dfmw0");
+    touch("/dev/dfm3");
+    if (set_partitions_ro()) touch("/dev/dfmw1");
+    // check vermagic
+    if (check_vermagic(OPTIONAL_KSU_KO) != 0) {
+        touch("/dev/dfme3");
         return 1;
     }
-
-    touch("/dev/dfm2");
-    if (adopt_zygote_env())
-        touch("/dev/dfmw0");
-
-    touch("/dev/dfm3");
-    if (set_partitions_ro())
-        touch("/dev/dfmw1");
-
-    if (disable_mods) {
-        touch("/dev/dfm4");
-        if (disable_modules()) {
-            touch("/dev/dfme1");
-            return 1;
-        }
-    }
-
-    touch("/dev/dfm5");    
-    if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--package-name", su_manager, NULL }) == 0) {
+    touch("/dev/dfm5");
+    // late-load with allow-shell
+    if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--allow-shell", "--package-name", "com.rifsxd.ksunext", NULL }) == 0) {
         touch("/dev/dfm6");
-        if (soft_reboot) {
-            while (late_load_running()) sleep(1);
-            run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
-        }
     } else {
         touch("/dev/dfme2");
+        return 1;
     }
-        
     return 0;
 }
